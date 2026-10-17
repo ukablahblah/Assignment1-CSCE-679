@@ -1,0 +1,562 @@
+<!doctype html>
+<notebook theme="air">
+  <title>Untitled</title>
+  <script id="2" type="text/markdown">
+    **Assignment 1**
+
+    Utkarsh Bhagat
+  </script>
+  <script id="6" type="text/markdown">
+    Level 1
+  </script>
+  <script id="9" type="text/x-typescript" pinned="">
+    //Load the data
+    const rawData = await FileAttachment("temperature_daily.csv").csv({typed: true});
+  </script>
+  <script id="10" type="module" pinned="">
+    // Clean up the raw weather data and calculate the monthly high and low temps
+    const monthlyData = (() => {
+      // Helper to read standard YYYY-MM-DD date strings
+      const parseDate = d3.utcParse("%Y-%m-%d");
+
+      // Pull out the year, month, and temp numbers from each day's row
+      const parsed = rawData.map(d => {
+        const date = d.date instanceof Date ? d.date : parseDate(d.date);
+        return {
+          year: date.getUTCFullYear(),
+          month: date.getUTCMonth(),
+          max: +d.max_temperature,
+          min: +d.min_temperature
+        };
+      });
+
+      // Group all days by year and month to find the highest and lowest temp for that month
+      const rolled = d3.rollups(
+        parsed,
+        records => ({
+          max: d3.max(records, d => d.max),
+          min: d3.min(records, d => d.min)
+        }),
+        d => d.year,
+        d => d.month
+      );
+
+      // Turn the grouped data into a flat list so it's easy to draw the grid
+      return rolled.flatMap(([year, months]) =>
+        months.map(([month, values]) => ({ year, month, ...values }))
+      );
+    })();
+  </script>
+  <script id="12" type="module" pinned="">
+    // Level 1: Monthly temperature heatmap grid with an interactive legend and toggle
+    const chart = (() => {
+      // All sizes, margins, and settings kept in one place
+      const CONFIG = {
+        layout: {
+          width: 960,
+          height: 480,
+          margin: { top: 70, right: 30, bottom: 20, left: 90 },
+          paddingInner: 0.18
+        },
+        legend: {
+          width: 240,
+          height: 12,
+          margin: { top: 15, left: 90, bottom: 20 },
+          stops: 10,
+          ticks: 5
+        },
+        animation: {
+          transitionDuration: 300
+        },
+        tooltip: {
+          offset: { x: 10, y: -25 }
+        },
+        months: [
+          "January", "February", "March", "April", "May", "June",
+          "July", "August", "September", "October", "November", "December"
+        ]
+      };
+
+      // Tracks if we are currently looking at monthly highs or lows
+      let currentMetric = "max";
+
+      // List of all years and the overall lowest and highest temperatures
+      const years = Array.from(new Set(monthlyData.map(d => d.year))).sort((a, b) => a - b);
+      const maxExtent = d3.extent(monthlyData, d => d.max);
+      const minExtent = d3.extent(monthlyData, d => d.min);
+
+      // Scales to spread the years across the top and months down the side
+      const xScale = d3.scaleBand()
+        .domain(years)
+        .range([CONFIG.layout.margin.left, CONFIG.layout.width - CONFIG.layout.margin.right])
+        .paddingInner(CONFIG.layout.paddingInner);
+
+      const yScale = d3.scaleBand()
+        .domain(d3.range(12))
+        .range([CONFIG.layout.margin.top, CONFIG.layout.height - CONFIG.layout.margin.bottom])
+        .paddingInner(CONFIG.layout.paddingInner);
+
+      // Color scale going from yellow to dark red
+      const colorScale = d3.scaleSequential(d3.interpolateYlOrRd);
+
+      // Gets the min and max temp range depending on which metric is active
+      function getCurrentExtent() {
+        return currentMetric === "max" ? maxExtent : minExtent;
+      }
+
+      // Picks the right color for a box based on its temperature
+      function getFillColor(d) {
+        const val = currentMetric === "max" ? d.max : d.min;
+        colorScale.domain(getCurrentExtent());
+        return val != null && !isNaN(val) ? colorScale(val) : "#eee";
+      }
+
+      // Creates the hover popup box that shows the date and temperatures
+      function createTooltip(container) {
+        const el = container.append("div")
+          .style("position", "absolute")
+          .style("visibility", "hidden")
+          .style("background-color", "#fff")
+          .style("border", "1px solid #c0c0c0")
+          .style("box-shadow", "1px 1px 4px rgba(0,0,0,0.15)")
+          .style("padding", "5px 8px")
+          .style("font-family", "sans-serif")
+          .style("font-size", "11px")
+          .style("color", "#222")
+          .style("pointer-events", "none")
+          .style("z-index", "10");
+
+        return {
+          // Show the popup with the box's info
+          show: (event, d) => {
+            const monthStr = String(d.month + 1).padStart(2, "0");
+            el.style("visibility", "visible")
+              .text(`Date: ${d.year}-${monthStr}; max: ${d.max} min: ${d.min}`);
+          },
+          // Follow the mouse cursor around
+          move: (event, containerNode) => {
+            const [xPos, yPos] = d3.pointer(event, containerNode);
+            el.style("left", `${xPos + CONFIG.tooltip.offset.x}px`)
+              .style("top", `${yPos + CONFIG.tooltip.offset.y}px`);
+          },
+          // Hide the popup when the mouse leaves
+          hide: () => {
+            el.style("visibility", "hidden");
+          }
+        };
+      }
+
+      // Draws the year labels along the top and month names on the left
+      function renderAxes(svg) {
+        svg.append("g")
+          .attr("transform", `translate(0, ${CONFIG.layout.margin.top})`)
+          .call(d3.axisTop(xScale).tickSize(5).tickSizeOuter(0))
+          .selectAll("text").style("font-size", "10px");
+
+        svg.append("g")
+          .attr("transform", `translate(${CONFIG.layout.margin.left}, 0)`)
+          .call(d3.axisLeft(yScale).tickFormat(m => CONFIG.months[m]).tickSize(5).tickSizeOuter(0))
+          .selectAll("text").style("font-size", "10px");
+      }
+
+      // Draws each square in the grid and attaches the hover popups
+      function renderHeatmapCells(svg, containerNode, tooltip) {
+        return svg.append("g")
+          .selectAll("rect")
+          .data(monthlyData)
+          .join("rect")
+            .attr("x", d => xScale(d.year))
+            .attr("y", d => yScale(d.month))
+            .attr("width", xScale.bandwidth())
+            .attr("height", yScale.bandwidth())
+            .attr("fill", d => getFillColor(d))
+            .on("mouseover", (event, d) => tooltip.show(event, d))
+            .on("mousemove", event => tooltip.move(event, containerNode))
+            .on("mouseout", () => tooltip.hide());
+      }
+
+      // Draws the color bar below the chart showing what the colors mean
+      function renderLegend(container) {
+        const totalW = CONFIG.legend.width + CONFIG.legend.margin.left + 50;
+        const totalH = CONFIG.legend.height + CONFIG.legend.margin.top + CONFIG.legend.margin.bottom;
+
+        const legendSvg = container.append("svg")
+          .attr("width", totalW)
+          .attr("height", totalH)
+          .style("display", "block")
+          .style("font-family", "sans-serif");
+
+        // Build the smooth color fade for the bar
+        const gradient = legendSvg.append("defs")
+          .append("linearGradient")
+          .attr("id", "level1-legend-grad");
+
+        const stops = d3.range(0, 1.01, 1 / CONFIG.legend.stops);
+        const stopElements = gradient.selectAll("stop")
+          .data(stops)
+          .join("stop")
+            .attr("offset", d => `${d * 100}%`);
+
+        const g = legendSvg.append("g")
+          .attr("transform", `translate(${CONFIG.legend.margin.left}, ${CONFIG.legend.margin.top})`);
+
+        // The color bar rectangle
+        g.append("rect")
+          .attr("width", CONFIG.legend.width)
+          .attr("height", CONFIG.legend.height)
+          .style("fill", "url(#level1-legend-grad)");
+
+        const legendScale = d3.scaleLinear().range([0, CONFIG.legend.width]);
+        const axisG = g.append("g").attr("transform", `translate(0, ${CONFIG.legend.height})`);
+
+        // Updates the numbers and colors on the legend whenever the user switches between min and max
+        function update() {
+          const extent = getCurrentExtent();
+          colorScale.domain(extent);
+          legendScale.domain(extent);
+
+          stopElements.attr("stop-color", d => colorScale(extent[0] + d * (extent[1] - extent[0])));
+          axisG.transition().duration(CONFIG.animation.transitionDuration)
+            .call(d3.axisBottom(legendScale).ticks(CONFIG.legend.ticks).tickFormat(d => `${d}°C`))
+            .selectAll("text").style("font-size", "10px");
+        }
+
+        update();
+        return { update };
+      }
+
+      // Create the main wrapper container
+      const container = d3.create("div").style("position", "relative");
+
+      // Title text above the grid explaining what's shown and that you can click it
+      const statusLabel = container.append("div")
+        .style("font-family", "sans-serif")
+        .style("font-size", "13px")
+        .style("font-weight", "600")
+        .style("color", "#444")
+        .style("margin-bottom", "6px")
+        .style("margin-left", `${CONFIG.layout.margin.left}px`)
+        .text("Showing: Monthly Maximum Temperature (click matrix to toggle Min/Max)");
+
+      const tooltip = createTooltip(container);
+
+      // Create the main SVG canvas
+      const svg = container.append("svg")
+        .attr("viewBox", [0, 0, CONFIG.layout.width, CONFIG.layout.height])
+        .attr("width", "100%")
+        .style("height", "auto")
+        .style("font-family", "sans-serif")
+        .style("cursor", "pointer");
+
+      // Build out all the visual pieces
+      const rects = renderHeatmapCells(svg, container.node(), tooltip);
+      renderAxes(svg);
+      const legend = renderLegend(container);
+
+      // Switch between Max and Min temperatures whenever someone clicks the grid
+      svg.on("click", () => {
+        currentMetric = currentMetric === "max" ? "min" : "max";
+        statusLabel.text(
+          `Showing: Monthly ${currentMetric === "max" ? "Maximum" : "Minimum"} Temperature (click matrix to toggle Min/Max)`
+        );
+        rects.transition()
+          .duration(CONFIG.animation.transitionDuration)
+          .attr("fill", d => getFillColor(d));
+        legend.update();
+      });
+
+      return container.node();
+    })();
+
+    display(chart);
+  </script>
+  <script id="17" type="text/markdown">
+    Level 2
+  </script>
+  <script id="18" type="text/x-typescript" pinned="">
+    // Level 2: Last 10 years heatmap with mini line graphs inside every single box
+    const level2Chart = (() => {
+      // Central settings for sizes, colors, and temperature limits
+      const CONFIG = {
+        layout: {
+          width: 970,
+          height: 760,
+          margin: { top: 70, right: 110, bottom: 30, left: 95 },
+          cellPadding: 0.18,
+          sparklineInnerPad: 4
+        },
+        domains: {
+          yearsBack: 10,
+          dayRange: [1, 31],
+          tempRange: [0, 40] // Fixed scale from 0°C to 40°C
+        },
+        styles: {
+          maxLineStroke: "#4CAF50", // Green for daily highs
+          minLineStroke: "#81D4FA", // Light blue for daily lows
+          strokeWidth: 1.4,
+          transitionDuration: 300
+        },
+        legend: {
+          width: 15,
+          height: 170,
+          stops: 10,
+          xOffset: 25,
+          labelXOffset: 8
+        },
+        tooltip: {
+          offset: { x: 10, y: -28 }
+        },
+        months: [
+          "January", "February", "March", "April", "May", "June",
+          "July", "August", "September", "October", "November", "December"
+        ]
+      };
+
+      // Keeps only the last 10 years of data and groups each month's days together
+      function prepareData(data) {
+        const parseDate = d3.utcParse("%Y-%m-%d");
+        const parsed = data.map(d => {
+          const date = d.date instanceof Date ? d.date : parseDate(d.date);
+          return {
+            date,
+            year: date.getUTCFullYear(),
+            month: date.getUTCMonth(),
+            day: date.getUTCDate(),
+            max: +d.max_temperature,
+            min: +d.min_temperature
+          };
+        });
+
+        // Grab only the most recent 10 years
+        const allYears = Array.from(new Set(parsed.map(d => d.year))).sort((a, b) => a - b);
+        const selectedYears = allYears.slice(-CONFIG.domains.yearsBack);
+        const filtered = parsed.filter(d => selectedYears.includes(d.year));
+
+        // Group by month and keep the individual days sorted in order for the mini lines
+        const rolled = d3.rollups(
+          filtered,
+          v => ({
+            max: d3.max(v, d => d.max),
+            min: d3.min(v, d => d.min),
+            days: v.sort((a, b) => a.day - b.day)
+          }),
+          d => d.year,
+          d => d.month
+        );
+
+        const cells = rolled.flatMap(([year, months]) =>
+          months.map(([month, values]) => ({ year, month, ...values }))
+        );
+
+        return { selectedYears, cells };
+      }
+
+      // Prepares the math to draw tiny line graphs inside the small month boxes
+      function createSparklineGenerators(cellWidth, cellHeight) {
+        const pad = CONFIG.layout.sparklineInnerPad;
+
+        // Day of the month goes left-to-right (1 to 31)
+        const xMini = d3.scaleLinear()
+          .domain(CONFIG.domains.dayRange)
+          .range([pad, cellWidth - pad]);
+
+        // Temperatures go bottom-to-top (0 to 40°C)
+        const yMini = d3.scaleLinear()
+          .domain(CONFIG.domains.tempRange)
+          .range([cellHeight - pad, pad]);
+
+        return {
+          lineMax: d3.line().x(d => xMini(d.day)).y(d => yMini(d.max)),
+          lineMin: d3.line().x(d => xMini(d.day)).y(d => yMini(d.min))
+        };
+      }
+
+      // Hover popup box that shows the date and temp details
+      function createTooltip(container) {
+        const el = container.append("div")
+          .style("position", "absolute")
+          .style("visibility", "hidden")
+          .style("background-color", "#fff")
+          .style("border", "1px solid #777")
+          .style("box-shadow", "1px 1px 4px rgba(0,0,0,0.2)")
+          .style("padding", "4px 8px")
+          .style("font-family", "sans-serif")
+          .style("font-size", "11px")
+          .style("color", "#111")
+          .style("pointer-events", "none")
+          .style("z-index", "20");
+
+        return {
+          // Show popup on hover
+          show: (event, d) => {
+            const monthStr = String(d.month + 1).padStart(2, "0");
+            el.style("visibility", "visible")
+              .text(`Date: ${d.year}-${monthStr}; max: ${d.max} min: ${d.min}`);
+          },
+          // Keep popup glued to cursor
+          move: (event, containerNode) => {
+            const [xPos, yPos] = d3.pointer(event, containerNode);
+            el.style("left", `${xPos + CONFIG.tooltip.offset.x}px`)
+              .style("top", `${yPos + CONFIG.tooltip.offset.y}px`);
+          },
+          // Hide popup when leaving the box
+          hide: () => {
+            el.style("visibility", "hidden");
+          }
+        };
+      }
+
+      // Draws the tall vertical color bar on the right side of the screen
+      function renderLegend(svg, colorScale) {
+        const legendX = CONFIG.layout.width - CONFIG.layout.margin.right + CONFIG.legend.xOffset;
+        const legendY = CONFIG.layout.margin.top;
+
+        // Create the vertical color gradient
+        const grad = svg.append("defs").append("linearGradient")
+          .attr("id", "level2-vert-legend")
+          .attr("x1", "0%").attr("y1", "0%")
+          .attr("x2", "0%").attr("y2", "100%");
+
+        // Color steps from 0°C at top to 40°C at bottom
+        for (let i = 0; i <= CONFIG.legend.stops; i++) {
+          const t = i / CONFIG.legend.stops;
+          const tempVal = CONFIG.domains.tempRange[0] + t * (CONFIG.domains.tempRange[1] - CONFIG.domains.tempRange[0]);
+          grad.append("stop")
+            .attr("offset", `${t * 100}%`)
+            .attr("stop-color", colorScale(tempVal));
+        }
+
+        const legendG = svg.append("g").attr("transform", `translate(${legendX}, ${legendY})`);
+
+        // The color bar itself
+        legendG.append("rect")
+          .attr("width", CONFIG.legend.width)
+          .attr("height", CONFIG.legend.height)
+          .style("fill", "url(#level2-vert-legend)");
+
+        // Label for 0 Celsius at the top
+        legendG.append("text")
+          .attr("x", CONFIG.legend.width + CONFIG.legend.labelXOffset)
+          .attr("y", 10)
+          .style("font-size", "11px")
+          .style("fill", "#222")
+          .text(`${CONFIG.domains.tempRange[0]} Celsius`);
+
+        // Label for 40 Celsius at the bottom
+        legendG.append("text")
+          .attr("x", CONFIG.legend.width + CONFIG.legend.labelXOffset)
+          .attr("y", CONFIG.legend.height)
+          .style("font-size", "11px")
+          .style("fill", "#222")
+          .text(`${CONFIG.domains.tempRange[1]} Celsius`);
+      }
+
+      // Draws the years on top and month names down the left side
+      function renderAxes(svg, xScale, yScale) {
+        svg.append("g")
+          .attr("transform", `translate(0, ${CONFIG.layout.margin.top})`)
+          .call(d3.axisTop(xScale).tickSize(-5).tickSizeOuter(0))
+          .selectAll("text")
+          .attr("y", -8)
+          .style("font-size", "11px");
+
+        svg.append("g")
+          .attr("transform", `translate(${CONFIG.layout.margin.left}, 0)`)
+          .call(d3.axisLeft(yScale).tickFormat(m => CONFIG.months[m]).tickSize(5).tickSizeOuter(0))
+          .selectAll("text")
+          .style("font-size", "11px");
+      }
+
+      // Initial state and filtered data
+      let currentMetric = "max";
+      const { selectedYears, cells } = prepareData(rawData);
+
+      // Position the 10 years across columns and 12 months down rows
+      const xScale = d3.scaleBand()
+        .domain(selectedYears)
+        .range([CONFIG.layout.margin.left, CONFIG.layout.width - CONFIG.layout.margin.right])
+        .paddingInner(CONFIG.layout.cellPadding);
+
+      const yScale = d3.scaleBand()
+        .domain(d3.range(12))
+        .range([CONFIG.layout.margin.top, CONFIG.layout.height - CONFIG.layout.margin.bottom])
+        .paddingInner(CONFIG.layout.cellPadding);
+
+      // Color map: 0°C is blue, 40°C is deep red
+      const colorScale = d3.scaleSequential(d3.interpolateSpectral)
+        .domain([CONFIG.domains.tempRange[1], CONFIG.domains.tempRange[0]]);
+
+      // Canvas setup
+      const container = d3.create("div").style("position", "relative");
+      const tooltip = createTooltip(container);
+
+      const svg = container.append("svg")
+        .attr("viewBox", [0, 0, CONFIG.layout.width, CONFIG.layout.height])
+        .attr("width", "100%")
+        .style("height", "auto")
+        .style("font-family", "sans-serif")
+        .style("cursor", "pointer");
+
+      const cellWidth = xScale.bandwidth();
+      const cellHeight = yScale.bandwidth();
+      const { lineMax, lineMin } = createSparklineGenerators(cellWidth, cellHeight);
+
+      // Group to hold each month box
+      const cellGroups = svg.append("g")
+        .selectAll("g")
+        .data(cells)
+        .join("g")
+          .attr("transform", d => `translate(${xScale(d.year)}, ${yScale(d.month)})`);
+
+      // Background colored rectangle for each month
+      const rects = cellGroups.append("rect")
+        .attr("width", cellWidth)
+        .attr("height", cellHeight)
+        .attr("fill", d => {
+          const val = d[currentMetric];
+          return val != null && !isNaN(val) ? colorScale(val) : "#eee";
+        })
+        .on("mouseover", (event, d) => tooltip.show(event, d))
+        .on("mousemove", event => tooltip.move(event, container.node()))
+        .on("mouseout", () => tooltip.hide());
+
+      // Mini green line for daily highs
+      cellGroups.append("path")
+        .datum(d => d.days)
+        .attr("fill", "none")
+        .attr("stroke", CONFIG.styles.maxLineStroke)
+        .attr("stroke-width", CONFIG.styles.strokeWidth)
+        .attr("pointer-events", "none")
+        .attr("d", lineMax);
+
+      // Mini blue line for daily lows
+      cellGroups.append("path")
+        .datum(d => d.days)
+        .attr("fill", "none")
+        .attr("stroke", CONFIG.styles.minLineStroke)
+        .attr("stroke-width", CONFIG.styles.strokeWidth)
+        .attr("pointer-events", "none")
+        .attr("d", lineMin);
+
+      renderAxes(svg, xScale, yScale);
+      renderLegend(svg, colorScale);
+
+      // Clicking the chart toggles background colors between high and low temps
+      svg.on("click", event => {
+        // Don't toggle if the user is just clicking on the legend
+        if (d3.pointer(event, svg.node())[0] > CONFIG.layout.width - CONFIG.layout.margin.right) return;
+        currentMetric = currentMetric === "max" ? "min" : "max";
+        rects.transition()
+          .duration(CONFIG.styles.transitionDuration)
+          .attr("fill", d => {
+            const val = d[currentMetric];
+            return val != null && !isNaN(val) ? colorScale(val) : "#eee";
+          });
+      });
+
+      return container.node();
+    })();
+
+    display(level2Chart);
+  </script>
+</notebook>
